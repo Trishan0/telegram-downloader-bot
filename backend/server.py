@@ -71,6 +71,9 @@ def get_base_opts() -> dict:
     cookies_file = Path("/app/cookies.txt")
     if cookies_file.exists():
         opts["cookiefile"] = str(cookies_file)
+        logger.info("Using cookies.txt for authentication")
+    else:
+        logger.warning("cookies.txt not found — downloads may be limited")
     return opts
 
 
@@ -186,37 +189,65 @@ async def run_download_job(job_id: str, url: str, fmt: str, media_type: str, cha
                 "total": sizeof_fmt(total) if total else "?",
             })
 
-    out_tmpl = str(DOWNLOAD_DIR / f"{chat_id}_{job_id}_%(title).60s.%(ext)s")
-    ydl_opts = {
-        **get_base_opts(),
-        "format": fmt,
-        "outtmpl": out_tmpl,
-        "progress_hooks": [progress_hook],
-        "merge_output_format": "mp4" if media_type == "video" else None,
-        "postprocessors": [],
-    }
+    # Fallback format chain
+    format_chain = [fmt]
+    if media_type == "video":
+        if fmt == "bestvideo+bestaudio/best":
+            format_chain.extend(["best[ext=mp4]", "best[ext=webm]", "best"])
+        elif "+" in fmt:
+            format_chain.extend(["best[ext=mp4]", "best"])
+    elif media_type == "audio":
+        if fmt == "bestaudio/best":
+            format_chain.extend(["best[ext=m4a]", "best[ext=webm]", "best"])
 
-    if media_type == "audio":
-        ydl_opts["postprocessors"].append({
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        })
+    out_tmpl = str(DOWNLOAD_DIR / f"{chat_id}_{job_id}_%(title).60s.%(ext)s")
 
     try:
         def _dl():
             nonlocal filepath
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                raw = ydl.prepare_filename(info)
-                p = Path(raw)
-                for ext in ["mp4", "mkv", "webm", "mp3", "m4a", "opus", "ogg"]:
-                    c = p.with_suffix(f".{ext}")
-                    if c.exists():
-                        filepath = c
-                        return
-                if p.exists():
-                    filepath = p
+            last_error = None
+            
+            for attempt_fmt in format_chain:
+                try:
+                    ydl_opts = {
+                        **get_base_opts(),
+                        "format": attempt_fmt,
+                        "outtmpl": out_tmpl,
+                        "progress_hooks": [progress_hook] if attempt_fmt == fmt else [],
+                        "merge_output_format": "mp4" if media_type == "video" else None,
+                        "postprocessors": [],
+                    }
+
+                    if media_type == "audio":
+                        ydl_opts["postprocessors"].append({
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": "192",
+                        })
+
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        raw = ydl.prepare_filename(info)
+                        p = Path(raw)
+                        for ext in ["mp4", "mkv", "webm", "mp3", "m4a", "opus", "ogg"]:
+                            c = p.with_suffix(f".{ext}")
+                            if c.exists():
+                                filepath = c
+                                if attempt_fmt != fmt:
+                                    logger.info(f"Download succeeded with fallback format: {attempt_fmt}")
+                                return
+                        if p.exists():
+                            filepath = p
+                            if attempt_fmt != fmt:
+                                logger.info(f"Download succeeded with fallback format: {attempt_fmt}")
+                            return
+                except Exception as e:
+                    last_error = e
+                    logger.debug(f"Format {attempt_fmt} failed: {e}")
+                    continue
+            
+            if last_error:
+                raise last_error
 
         await asyncio.to_thread(_dl)
 

@@ -76,6 +76,9 @@ def get_ydl_base_opts() -> dict:
     cookies_file = Path("/app/cookies.txt")
     if cookies_file.exists():
         opts["cookiefile"] = str(cookies_file)
+        logger.info("Using cookies.txt for authentication")
+    else:
+        logger.warning("cookies.txt not found — downloads may be limited")
     return opts
 
 
@@ -205,37 +208,64 @@ async def download_media(url, fmt, media_type, chat_id, status_msg, context):
     hook = ProgressHook(loop, chat_id, status_msg.message_id, context.bot)
     out_template = str(DOWNLOAD_DIR / f"{chat_id}_%(title).80s.%(ext)s")
 
-    ydl_opts = {
-        **get_ydl_base_opts(),
-        "format": fmt,
-        "outtmpl": out_template,
-        "progress_hooks": [hook],
-        "merge_output_format": "mp4" if media_type == "video" else None,
-        "postprocessors": [],
-    }
-
-    if media_type == "audio":
-        ydl_opts["postprocessors"].append({
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        })
+    # Fallback format chain
+    format_chain = [fmt]
+    if media_type == "video":
+        if fmt == "bestvideo+bestaudio/best":
+            format_chain.extend(["best[ext=mp4]", "best[ext=webm]", "best"])
+        elif "+" in fmt:
+            format_chain.extend(["best[ext=mp4]", "best"])
+    elif media_type == "audio":
+        if fmt == "bestaudio/best":
+            format_chain.extend(["best[ext=m4a]", "best[ext=webm]", "best"])
 
     downloaded_file = None
 
     def _run_download():
         nonlocal downloaded_file
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            p = Path(filename)
-            for ext in ["mp4", "mkv", "webm", "mp3", "m4a", "opus", "ogg"]:
-                candidate = p.with_suffix(f".{ext}")
-                if candidate.exists():
-                    downloaded_file = candidate
-                    return
-            if p.exists():
-                downloaded_file = p
+        last_error = None
+        
+        for attempt_fmt in format_chain:
+            try:
+                ydl_opts = {
+                    **get_ydl_base_opts(),
+                    "format": attempt_fmt,
+                    "outtmpl": out_template,
+                    "progress_hooks": [hook] if attempt_fmt == fmt else [],
+                    "merge_output_format": "mp4" if media_type == "video" else None,
+                    "postprocessors": [],
+                }
+
+                if media_type == "audio":
+                    ydl_opts["postprocessors"].append({
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    })
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+                    p = Path(filename)
+                    for ext in ["mp4", "mkv", "webm", "mp3", "m4a", "opus", "ogg"]:
+                        candidate = p.with_suffix(f".{ext}")
+                        if candidate.exists():
+                            downloaded_file = candidate
+                            if attempt_fmt != fmt:
+                                logger.info(f"Download succeeded with fallback format: {attempt_fmt}")
+                            return
+                    if p.exists():
+                        downloaded_file = p
+                        if attempt_fmt != fmt:
+                            logger.info(f"Download succeeded with fallback format: {attempt_fmt}")
+                        return
+            except Exception as e:
+                last_error = e
+                logger.debug(f"Format {attempt_fmt} failed: {e}")
+                continue
+        
+        if last_error:
+            raise last_error
 
     await asyncio.to_thread(_run_download)
     return downloaded_file
