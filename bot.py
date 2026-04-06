@@ -66,12 +66,17 @@ def sanitize_filename(name: str) -> str:
 
 
 def get_ydl_base_opts() -> dict:
-    return {
+    from pathlib import Path
+    opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "cookiesfrombrowser": None,
     }
+    # Use cookies.txt if available
+    cookies_file = Path("/app/cookies.txt")
+    if cookies_file.exists():
+        opts["cookiefile"] = str(cookies_file)
+    return opts
 
 
 def extract_info_safe(url: str, opts: dict) -> dict | None:

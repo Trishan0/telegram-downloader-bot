@@ -65,7 +65,13 @@ def sizeof_fmt(num_bytes: float) -> str:
 
 
 def get_base_opts() -> dict:
-    return {"quiet": True, "no_warnings": True, "noplaylist": True}
+    from pathlib import Path
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    # Use cookies.txt if available
+    cookies_file = Path("/app/cookies.txt")
+    if cookies_file.exists():
+        opts["cookiefile"] = str(cookies_file)
+    return opts
 
 
 def _extract_info(url: str, extra: dict) -> dict | None:

@@ -14,6 +14,7 @@ services:
       - "8000:8000"
     volumes:
       - downloads:/app/downloads
+      - ./cookies.txt:/app/cookies.txt:ro
     restart: unless-stopped
 
   bot:
